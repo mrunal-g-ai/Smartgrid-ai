@@ -1,0 +1,4 @@
+timestamp,demand_mw,region,source,source_url,is_live,thermal_mw,renewable_mw,hydro_mw,nuclear_mw,gas_mw,storage_mw,other_mw,trans_national_mw
+2026-10-07 14:00:00+05:30,249262.0,ALL INDIA,MERIT India (meritindia.in) / POSOCO / NLDC,https://meritindia.in/Dashboard/BindAllIndiaMap,True,,,,,,,,
+2026-10-07 14:15:00+05:30,252603.0,ALL INDIA,MERIT India (meritindia.in) / POSOCO / NLDC,https://meritindia.in/Dashboard/BindAllIndiaMap,True,,,,,,,,
+2026-10-07 14:30:00+05:30,254682.0,ALL INDIA,"MERIT India (meritindia.in) / POSOCO / NLDC, Ministry of Power",https://meritindia.in/Dashboard/BindAllIndiaMap,True,145621.0,85417.0,13125.0,7187.0,3601.0,3.0,2130.0,-1150.0

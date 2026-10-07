@@ -1,95 +1,170 @@
-import os
-import requests
+﻿"""
+SmartGrid AI -- Weather Module (Open-Meteo, no API key required)
+================================================================
+Source:       Open-Meteo (https://open-meteo.com/)
+              Free, no authentication required.
+              License: CC BY 4.0 (attribution required).
+
+Location:     New Delhi, India
+              Latitude:  28.6139
+              Longitude: 77.2090
+              Timezone:  Asia/Kolkata
+"""
+
+from __future__ import annotations
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any
+
 import pandas as pd
-from dotenv import load_dotenv
+import requests
 
-# Load environment variables
-load_dotenv()
+_logger = logging.getLogger(__name__)
 
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+# Location
+WEATHER_LAT     = 28.6139    # New Delhi
+WEATHER_LON     = 77.2090
+WEATHER_TZ      = "Asia/Kolkata"
+SOURCE_LABEL    = "Open-Meteo (open-meteo.com) -- New Delhi, India"
+IST             = timezone(timedelta(hours=5, minutes=30))
+REQUEST_TIMEOUT = 10
+OPENMETEO_URL   = "https://api.open-meteo.com/v1/forecast"
 
-def get_current_weather(city="Mumbai"):
-    """
-    Fetch current weather from OpenWeatherMap.
-    """
-    if not OPENWEATHER_API_KEY:
-        return {"status": "FALLBACK WEATHER", "error": "API Key Missing"}
 
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
-    
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        
-        return {
-            "temperature": data["main"]["temp"],
-            "humidity": data["main"]["humidity"],
-            "wind_speed": data["wind"]["speed"],
-            "status": "LIVE WEATHER"
-        }
-    except Exception as e:
-        return {"status": "FALLBACK WEATHER", "error": str(e)}
-
-def get_fallback_weather(df):
-    """
-    Get the most recent weather from the dataset as a fallback.
-    """
-    recent = df.iloc[-1]
+def _build_openmeteo_params():
     return {
-        "temperature": recent["temperature"],
-        "humidity": recent["humidity"],
-        "wind_speed": recent["wind_speed"],
-        "status": "FALLBACK WEATHER"
+        "latitude":         WEATHER_LAT,
+        "longitude":        WEATHER_LON,
+        "current":          "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+        "hourly":           "temperature_2m,relative_humidity_2m,wind_speed_10m",
+        "past_days":        2,
+        "forecast_days":    2,
+        "timezone":         WEATHER_TZ,
+        "wind_speed_unit":  "ms",
     }
 
-def get_weather_forecast(city="Mumbai"):
-    """
-    Fetch 24-hour weather forecast from OpenWeatherMap (interpolated to hourly).
-    """
-    if not OPENWEATHER_API_KEY:
-        return {"status": "FALLBACK WEATHER", "error": "API Key Missing"}
-        
-    url = f"http://api.openweathermap.org/data/2.5/forecast?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        
-        forecast = []
-        for item in data['list']:
-            forecast.append({
-                'timestamp': pd.to_datetime(item['dt_txt']),
-                'temperature': item['main']['temp'],
-                'humidity': item['main']['humidity'],
-                'wind_speed': item['wind']['speed']
-            })
-            
-        df = pd.DataFrame(forecast).set_index('timestamp')
-        df = df.resample('1h').interpolate(method='linear')
-        
-        # We just need 24 rows, we'll align them to the energy forecast in the energy model
-        df = df.reset_index().head(24)
-        
-        if len(df) < 24:
-            raise ValueError("Insufficient forecast data from API")
-            
-        return {"status": "LIVE WEATHER", "forecast": df}
-    except Exception as e:
-        return {"status": "FALLBACK WEATHER", "error": str(e)}
 
-def get_fallback_weather_forecast(df, start_time):
+def get_weather_openmeteo(start_after: Optional[datetime] = None) -> Dict[str, Any]:
     """
-    Get fallback 24-hour weather forecast using the last 24 hours of data.
+    Fetch current conditions and 24-hour hourly forecast from Open-Meteo.
     """
-    last_24 = df.iloc[-24:].copy()
-    
-    timestamps = [start_time + pd.Timedelta(hours=i) for i in range(24)]
-    
-    forecast_df = pd.DataFrame({
-        'timestamp': timestamps,
-        'temperature': last_24['temperature'].values,
-        'humidity': last_24['humidity'].values,
-        'wind_speed': last_24['wind_speed'].values
-    })
-    return {"status": "FALLBACK WEATHER", "forecast": forecast_df}
+    if start_after is None:
+        start_after = datetime.now(IST)
+
+    try:
+        resp = requests.get(OPENMETEO_URL, params=_build_openmeteo_params(), timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        _logger.warning("Open-Meteo fetch failed: %s", exc)
+        return _fallback_weather(start_after, str(exc))
+
+    try:
+        cur = data["current"]
+        current = {
+            "temperature":   float(cur["temperature_2m"]),
+            "humidity":      float(cur["relative_humidity_2m"]),
+            "wind_speed":    float(cur["wind_speed_10m"]),
+            "weather_code":  int(cur.get("weather_code", 0)),
+            "source":        SOURCE_LABEL,
+            "fetched_at":    datetime.now(IST),
+            "status":        "LIVE",
+        }
+    except (KeyError, TypeError) as exc:
+        _logger.warning("Open-Meteo current parse error: %s", exc)
+        return _fallback_weather(start_after, str(exc))
+
+    try:
+        hourly = data["hourly"]
+        fc_df = pd.DataFrame({
+            "timestamp":   pd.to_datetime(hourly["time"]).tz_localize("Asia/Kolkata"),
+            "temperature": hourly["temperature_2m"],
+            "humidity":    hourly["relative_humidity_2m"],
+            "wind_speed":  hourly["wind_speed_10m"],
+        })
+
+        # Select hours strictly AFTER start_after, take next 24
+        future_df = fc_df[fc_df["timestamp"] > start_after].head(24).reset_index(drop=True)
+
+        if len(future_df) < 24:
+            while len(future_df) < 24:
+                last_row = future_df.iloc[-1].copy()
+                last_row["timestamp"] = last_row["timestamp"] + pd.Timedelta(hours=1)
+                future_df = pd.concat([future_df, pd.DataFrame([last_row])], ignore_index=True)
+
+    except (KeyError, TypeError, IndexError) as exc:
+        _logger.warning("Open-Meteo hourly parse error: %s", exc)
+        return _fallback_weather(start_after, str(exc))
+
+    return {
+        "status":    "LIVE",
+        "current":   current,
+        "forecast":  future_df,
+        "all_hourly": fc_df,
+        "error_msg": None,
+    }
+
+
+def _fallback_weather(start_after: datetime, error_msg: str = "") -> Dict[str, Any]:
+    now_ist = datetime.now(IST)
+    timestamps = [start_after + timedelta(hours=i) for i in range(1, 25)]
+    import math
+    fc_rows = []
+    for ts in timestamps:
+        hour = ts.hour
+        temp = 28.0 + 5.0 * math.sin((hour - 5) * 3.14159 / 12)
+        fc_rows.append({
+            "timestamp":   ts,
+            "temperature": round(float(temp), 1),
+            "humidity":    55.0,
+            "wind_speed":  3.0,
+        })
+
+    fc_df = pd.DataFrame(fc_rows)
+
+    return {
+        "status": "FALLBACK",
+        "current": {
+            "temperature":  30.0,
+            "humidity":     55.0,
+            "wind_speed":   3.0,
+            "weather_code": 0,
+            "source":       "Fallback (Open-Meteo unreachable) -- Seasonal baseline",
+            "fetched_at":   now_ist,
+            "status":       "FALLBACK",
+        },
+        "forecast":   fc_df,
+        "all_hourly": fc_df,
+        "error_msg":  f"Open-Meteo unavailable: {error_msg}",
+    }
+
+
+# Backwards compatibility helper functions
+def get_current_weather() -> Dict[str, Any]:
+    res = get_weather_openmeteo()
+    cur = res["current"]
+    cur["status"] = res["status"]
+    return cur
+
+
+def get_weather_forecast(start_after: Optional[datetime] = None) -> Dict[str, Any]:
+    res = get_weather_openmeteo(start_after=start_after)
+    return {
+        "status": res["status"],
+        "forecast": res["forecast"],
+    }
+
+
+def get_fallback_weather(df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    fb = _fallback_weather(datetime.now(IST))
+    return fb["current"]
+
+
+def get_fallback_weather_forecast(df: Optional[pd.DataFrame] = None, start_ts: Optional[datetime] = None) -> Dict[str, Any]:
+    if start_ts is None:
+        start_ts = datetime.now(IST)
+    fb = _fallback_weather(start_ts)
+    return {
+        "status": "FALLBACK",
+        "forecast": fb["forecast"],
+    }
